@@ -32,15 +32,22 @@ main = do
 
 worker :: Socket -> SockAddr -> IO ()
 worker c remote = do
-    putStrLn $ "Connection from: " ++ (show remote)
+    putStrLn $ "Connection from: " ++ show remote
     req <- getContents c
     print $ parse httpRequest req
     close c
 
 -- TODO helpers like skipSpace = skipWhile (== ' ')
-method = choice $ map stringCI [ "CONNECT", "OPTIONS", "GET", "HEAD", "POST", "PUT", "DELETE", "TRACE" ]
+method :: Parser String
+method = fmap toString $ choice $ map stringCI [ "CONNECT", "OPTIONS", "GET", "HEAD", "POST", "PUT", "DELETE", "TRACE" ]
+
+uri :: Parser String
 uri = many' (satisfy (not . isSpace)) -- TODO actually only ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;= should be valid (RFC 3986) so we want an efficient Char -> Bool that is True for these chars
-httpVersion = string "HTTP/1.1" <|> string "HTTP/1.0"
+
+httpVersion :: Parser String
+httpVersion = fmap toString $ string "HTTP/1.1" <|> string "HTTP/1.0"
+
+header :: Parser (String, String)
 header = do
     k <- many' (satisfy (\x -> not (isSpace x) && x /= ':'))
     char ':'
@@ -49,6 +56,7 @@ header = do
     string "\r\n"
     return (k, v)
 
+httpRequest :: Parser HTTPRequest
 httpRequest = do
     m <- method
     skipWhile (== ' ')
@@ -57,4 +65,4 @@ httpRequest = do
     _ <- httpVersion
     string "\r\n"
     hs <- many' header
-    return $ HTTPRequest (toString m) u hs
+    return $ HTTPRequest m u hs
