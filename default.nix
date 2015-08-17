@@ -2,14 +2,14 @@
 
 { haskellPackages ? (import <nixpkgs> {}).haskellPackages, pkgs ? (import <nixpkgs> {}).pkgs }:
 let
-    inherit (haskellPackages) cabal cabalInstall ghc network attoparsec utf8String;
+    inherit (haskellPackages) cabal socks cabalInstall ghc network attoparsec utf8String split;
 in cabal.mkDerivation (self: {
   pname = "hoax";
   version = "0.1.0.0";
   src = ./.;
   isLibrary = false;
   isExecutable = true;
-  buildDepends = [ network attoparsec utf8String ];
+  buildDepends = [ network attoparsec socks utf8String split ];
   buildTools = [ ghc cabalInstall pkgs.vim ];
   meta = {
     license = self.stdenv.lib.licenses.unfree;

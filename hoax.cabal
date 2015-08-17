@@ -24,4 +24,8 @@ executable hoax
                      , bytestring
                      , attoparsec
                      , utf8-string
+                     , split
+                     , socks
+                     , random
+                     , unix
   default-language:    Haskell2010
