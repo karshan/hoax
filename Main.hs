@@ -1,24 +1,34 @@
-{-# LANGUAGE OverloadedStrings, FlexibleInstances, ScopedTypeVariables #-}
-import Control.Applicative ((<|>), (<$>))
-import Control.Concurrent (forkIO)
-import Control.Exception (SomeException, catch)
-import Control.Monad (forever)
-import Data.Attoparsec.ByteString (parseOnly, parse, maybeResult, eitherResult)
-import Data.Attoparsec.ByteString.Char8 hiding (parse, parseOnly, maybeResult, eitherResult)
-import qualified Data.ByteString as B
-import qualified Data.ByteString.UTF8 as B (toString)
-import Data.Char (ord, isPrint)
-import Data.Maybe (fromMaybe, listToMaybe)
-import Data.String (IsString(..))
-import GHC.Word (Word8)
-import Network.Socket hiding (send, sendTo, recv, recvFrom)
-import Network.Socket.ByteString
-import Network.Socks5
-import Prelude hiding (getContents, takeWhile)
-import System.Environment (getArgs)
-import System.Exit (exitSuccess)
-import System.Posix.Signals (installHandler, keyboardSignal, Handler(Catch))
-import System.Random (randomIO)
+{-# LANGUAGE FlexibleInstances   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+import           Control.Applicative              ((<$>), (<|>))
+import           Control.Concurrent               (forkIO)
+import           Control.Exception                (SomeException, catch, try)
+import           Control.Monad                    (forever)
+import           Data.Attoparsec.ByteString       (eitherResult, maybeResult,
+                                                   parse, parseOnly)
+import           Data.Attoparsec.ByteString.Char8 hiding (eitherResult,
+                                                   maybeResult, parse,
+                                                   parseOnly, try)
+import           Data.ByteString                  (ByteString)
+import qualified Data.ByteString                  as B
+import qualified Data.ByteString.UTF8             as B (toString)
+import           Data.Char                        (isPrint, ord)
+import           Data.Function                    ((&))
+import           Data.Maybe                       (fromMaybe, listToMaybe)
+import           Data.String                      (IsString (..))
+import           GHC.Word                         (Word8)
+import           Network.Socket                   hiding (recv, recvFrom, send,
+                                                   sendTo)
+import           Network.Socket.ByteString
+import           Network.Socks5                   ()
+import           Prelude                          hiding (getContents, takeWhile)
+import           System.Environment               (getArgs)
+import           System.Exit                      (exitSuccess)
+import           System.Posix.Signals             (Handler (Catch),
+                                                   installHandler,
+                                                   keyboardSignal)
+import           System.Random                    (randomIO)
 
 -- TODO handle exceptions
 
@@ -26,18 +36,32 @@ instance IsString [Word8] where
     fromString = map (fromIntegral . ord)
 
 data HTTPRequest = HTTPRequest {
-        qMethod :: B.ByteString,
-        qPath :: B.ByteString,
+        qMethod  :: B.ByteString,
+        qPath    :: B.ByteString,
         qHeaders :: [(B.ByteString, B.ByteString)],
-        qBody :: B.ByteString
+        qBody    :: B.ByteString
     } deriving (Show, Read, Eq, Ord)
 
-errorPrint :: (Show a) => a -> IO ()
-errorPrint x = putStrLn $ "ERROR: " ++ show x
+setPort :: PortNumber -> SockAddr -> SockAddr
+setPort p (SockAddrInet _ h) = SockAddrInet p h
+setPort p (SockAddrInet6 _ f h s) = SockAddrInet6 p f h s
+setPort _ _ = error "wtf seriously, getaddrinfo returned a unix socket !?"
 
-debug :: (Show a) => a -> IO ()
+connect' :: ByteString -> Integer -> IO (Maybe Socket)
+connect' host port = do
+    out_socket <- socket AF_INET Stream defaultProtocol
+    msockaddr <- fmap (setPort (fromInteger port) . addrAddress) . listToMaybe . filter ((/= AF_INET6) . addrFamily) <$>
+        getAddrInfo Nothing (Just . B.toString $ host) Nothing
+    msockaddr & maybe (putStrLn "getAddrInfo failed" >> return Nothing) (\sockaddr -> do
+        e <- try (connect out_socket sockaddr)
+        either (\(_ :: SomeException) -> putStrLn "connect failed" >> return Nothing) (const (return (Just out_socket))) e)
+
+errorPrint :: (Show a) => String -> Maybe a -> IO ()
+errorPrint msg m_x = putStrLn $ "ERROR: " ++ msg ++ maybe "" (\x -> "<" ++ show x ++ ">") m_x
+
+debug :: (Show a) => String -> Maybe a -> IO ()
 -- debug = const $ return ()
-debug x = putStrLn $ "DEBUG: " ++ show x
+debug msg m_x = putStrLn $ "DEBUG: " ++ msg ++ maybe "" (\x -> "<" ++ show x ++ ">") m_x
 
 main :: IO ()
 main = do
@@ -55,35 +79,35 @@ main = do
 
 worker :: Socket -> SockAddr -> IO ()
 worker c remote = do
-    debug $ "Connection from: " ++ show remote
     reqraw <- recv c (32*1024)
-    either (\x -> errorPrint (x, reqraw, remote)) (\req -> do
-        debug req
+    either (\x -> errorPrint "parseOnly httpRequest" (Just (x, reqraw, remote))) (\req -> do
         forward req c) $ parseOnly httpRequest reqraw
 
-changePort (SockAddrInet _ h) p = SockAddrInet p h
+changePort (SockAddrInet _ h) p      = SockAddrInet p h
 changePort (SockAddrInet6 _ a b c) p = SockAddrInet6 p a b c
 
-socksConnect' sh sp h p = socksConnect (defaultSocksConf sh sp) (SocksAddress (SocksAddrDomainName h) (fromInteger p))
+--socksConnect' sh sp h p = socksConnect (defaultSocksConf sh sp) (SocksAddress (SocksAddrDomainName h) (fromInteger p))
 
 forward :: HTTPRequest -> Socket -> IO ()
 forward req@(HTTPRequest { qMethod = "CONNECT" }) c = do
-    loopId <- (`mod` 100) <$> randomIO :: IO Int
-    either errorPrint (\(h, p) -> do
-        debug ("connecting to", (h, p))
-        (sock, _) <- socksConnect' "localhost" 3001 h (read (B.toString p))
-        sendAll c connect200response
-        _ <- forkIO $ doCopy c sock
-        _ <- forkIO $ doCopy sock c
-        return ()
-        ) $ parseOnly connectHost (qPath req)
+    either (errorPrint "parseOnly connectHost" . Just) (\(h, p) -> do
+        debug "CONNECT to" (Just (h, p))
+        mSock <- connect' h (read (B.toString p)) -- this read won't fail because p is guaranteed to be a string containing only digits by the connectHost parser
+        maybe (close c >> errorPrint "connect failed" (Just req))
+            (\sock -> do
+                sendAll c connect200response
+                _ <- forkIO $ doCopy c sock
+                _ <- forkIO $ doCopy sock c
+                return ())
+            mSock)
+        (parseOnly connectHost (qPath req))
         where
             connect200response = "HTTP/1.1 200 OK\r\nConnection Established\r\n\r\n"
-forward req c = debug "FUCK YOU" >> close c
+forward req c = errorPrint "not-CONNECT" (Just (qMethod req, qPath req)) >> close c
 
 doCopy :: Socket -> Socket -> IO ()
 doCopy from to = do
-    r <- recv from (32*1024) -- Magic Numbers from golang
+    r <- (recv from (32*1024)) `catch` (\(e :: SomeException) -> close from >> return "") -- Magic Numbers from golang
     if B.null r then close from
     else (sendAll to r >> doCopy from to) `catch` (\(e :: SomeException) -> close from)
 
